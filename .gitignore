@@ -1,0 +1,35 @@
+# Trained model - stored separately in the cloud
+best_EfficientNetB2 (1).keras
+*.keras
+
+# Python virtual environments
+.venv/
+venv/
+.env/
+.venv-model/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+
+# Logs
+*.log
+
+# Temporary prediction outputs
+prediction_result.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
