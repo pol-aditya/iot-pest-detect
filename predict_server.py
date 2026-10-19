@@ -7,16 +7,14 @@ import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image
+from huggingface_hub import hf_hub_download
 
 # --------------------------------------------------
 # 1. SETTINGS
 # --------------------------------------------------
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-MODEL_PATH = os.path.join(
-    BASE_DIR, "best_EfficientNetB2 (1).keras"
-)
+HF_REPO_ID = "apol123/efficientnet_iot"
+MODEL_FILENAME = "best_EfficientNetB2 (1).keras"
 
 IMG_SIZE = (260, 260)
 
@@ -48,17 +46,22 @@ def format_class_name(class_name):
 
 
 # --------------------------------------------------
-# 2. LOAD MODEL ONCE
+# 2. DOWNLOAD AND LOAD MODEL ONCE
 # --------------------------------------------------
 
-if not os.path.isfile(MODEL_PATH):
-    raise FileNotFoundError(
-        f"Model not found: {MODEL_PATH}"
-    )
+print("Downloading or locating model on Hugging Face...")
 
-print("Loading tomato disease model...")
+model_path = hf_hub_download(
+    repo_id=HF_REPO_ID,
+    filename=MODEL_FILENAME,
+    token=os.getenv("HF_TOKEN") or None
+)
+
+print("Model file ready. Loading TensorFlow model...")
+
 model = tf.keras.models.load_model(
-    MODEL_PATH, compile=False
+    model_path,
+    compile=False
 )
 
 print("Model loaded successfully.")
@@ -68,7 +71,8 @@ print("Output shape:", model.output_shape)
 if model.output_shape[-1] != len(class_names):
     raise ValueError(
         f"Model has {model.output_shape[-1]} outputs, "
-        f"but {len(class_names)} class names are defined."
+        f"but {len(class_names)} class names are defined. "
+        "Verify the model's original class order."
     )
 
 
@@ -82,41 +86,66 @@ CORS(app)
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Tomato disease AI server is running."
+    return jsonify({
+        "message": "Tomato disease AI server is running.",
+        "model": HF_REPO_ID,
+        "status": "ready"
+    })
 
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": model is not None
+    })
+
+
+# --------------------------------------------------
+# 4. IMAGE PREDICTION
+# --------------------------------------------------
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         if "image" not in request.files:
             return jsonify({
-                "error": "No image received."
+                "error": "No image received. Send the image "
+                         "using the multipart field named 'image'."
             }), 400
 
         image_bytes = request.files["image"].read()
 
-        # Decode the ESP32-CAM JPEG as an RGB image.
-        img = Image.open(
-            io.BytesIO(image_bytes)
-        ).convert("RGB")
+        if not image_bytes:
+            return jsonify({"error": "Uploaded image is empty."}), 400
 
-        # Match tomato_leaf_detection.py.
-        img = img.resize(IMG_SIZE)
+        # Decode the camera image into RGB.
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            img = source.convert("RGB")
+            img = img.resize(IMG_SIZE)
 
-        # Same preprocessing as your desktop script:
-        # float image, RGB, no division by 255.
-        img_array = np.asarray(
-            img, dtype=np.float32
+            # Match the preprocessing in your desktop script:
+            # float32 RGB pixels, with no division by 255.
+            img_array = np.asarray(img, dtype=np.float32)
+
+        img_array = np.expand_dims(img_array, axis=0)
+
+        raw_predictions = np.asarray(
+            model.predict(img_array, verbose=0)[0],
+            dtype=np.float64
         )
-        img_array = np.expand_dims(
-            img_array, axis=0
-        )
 
-        raw_predictions = model.predict(
-            img_array, verbose=0
-        )[0]
+        if (
+            raw_predictions.ndim != 1
+            or raw_predictions.size != len(class_names)
+            or not np.all(np.isfinite(raw_predictions))
+        ):
+            raise ValueError(
+                "Model returned invalid predictions. "
+                "Check the model output and class list."
+            )
 
-        # Match your existing score conversion logic.
+        # Preserve the existing score-conversion logic.
         if (
             np.any(raw_predictions < 0)
             or np.any(raw_predictions > 1)
@@ -124,9 +153,7 @@ def predict():
                 np.sum(raw_predictions), 1.0, atol=0.01
             )
         ):
-            shifted = (
-                raw_predictions - np.max(raw_predictions)
-            )
+            shifted = raw_predictions - np.max(raw_predictions)
             exp_values = np.exp(shifted)
             predictions = exp_values / np.sum(exp_values)
         else:
@@ -167,14 +194,21 @@ def predict():
             "top3": top3
         })
 
-    except Exception as error:
+    except Exception:
         app.logger.exception("Prediction failed")
-        return jsonify({"error": str(error)}), 500
+        return jsonify({
+            "error": "Image prediction failed. Check the server logs."
+        }), 500
 
+
+# --------------------------------------------------
+# 5. LOCAL RUNNING
+# --------------------------------------------------
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     app.run(
         host="0.0.0.0",
-        port=5000,
+        port=port,
         debug=False
     )
